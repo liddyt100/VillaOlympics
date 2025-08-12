@@ -157,6 +157,7 @@ class App:
         self.sb = Scoreboard()
         self.sb.load_from_csv(PLAYERS_CSV)
         self.sb.set_target_progresses()
+        self.inc_buttons = []  # (rect, player_index, delta)
 
         # Fonts
         self.font_big = pygame.font.SysFont("Arial", 28, bold=True)
@@ -174,11 +175,17 @@ class App:
             if event.type == pygame.QUIT:
                 self.running = False
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_r:     # Reload from CSV
+                if event.key == pygame.K_r:
                     self.sb.load_from_csv(PLAYERS_CSV)
                     self.sb.set_target_progresses()
-                elif event.key == pygame.K_SPACE:  # Reset animation
+                elif event.key == pygame.K_SPACE:
                     self.reset_animation()
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                mouse_pos = event.pos
+                for rect, player, delta in self.inc_buttons:
+                    if rect.collidepoint(mouse_pos):
+                        player.points += delta
+                        self.sb.set_target_progresses()
 
     def draw_grid(self, surf):
         # vertical tick marks at 0%, 25%, 50%, 75%, 100%
@@ -232,6 +239,9 @@ class App:
                 pygame.draw.rect(self.screen, col, pygame.Rect(flag_x - 16, lane_y + j*int(LANE_HEIGHT/6), 16, int(LANE_HEIGHT/6)))
 
     def draw_leaderboard(self):
+        # Clear inc_buttons to avoid accumulating duplicates
+        self.inc_buttons = []
+
         # Panel title
         title = self.font_big.render("Leaderboard", True, UI_ACCENT)
         self.screen.blit(title, (LEADERBOARD_X, 24))
@@ -265,6 +275,40 @@ class App:
             pts_txt = f"{int(p.points) if float(p.points).is_integer() else p.points}"
             pts_s = self.font_small.render(f"{pts_txt} pts", True, SCORE_COLOUR)
             self.screen.blit(pts_s, (LEADERBOARD_X + 120, y + 42))
+
+            # Adjust these values:
+            button_size = 20
+            button_gap = 20  # space between buttons and score
+            right_margin = 24  # distance from right edge of pill
+
+            # Fixed positions for buttons
+            plus_x = LEADERBOARD_X + LEADERBOARD_W - right_margin - button_size
+            score_x = plus_x - button_gap - button_size // 2
+            minus_x = plus_x - button_size - button_gap - button_size
+
+            score_y = y + row_h // 2
+
+            # Draw minus button
+            minus_rect = pygame.Rect(minus_x, score_y - button_size // 2, button_size, button_size)
+            pygame.draw.rect(self.screen, (200, 60, 60), minus_rect, border_radius=4)
+            minus_surf = self.font_small.render("–", True, (255, 255, 255))
+            minus_surf_rect = minus_surf.get_rect(center=minus_rect.center)
+            self.screen.blit(minus_surf, minus_surf_rect)
+            self.inc_buttons.append((minus_rect, p, -1))
+
+            # Draw plus button
+            plus_rect = pygame.Rect(plus_x, score_y - button_size // 2, button_size, button_size)
+            pygame.draw.rect(self.screen, (60, 200, 60), plus_rect, border_radius=4)
+            plus_surf = self.font_small.render("+", True, (255, 255, 255))
+            plus_surf_rect = plus_surf.get_rect(center=plus_rect.center)
+            self.screen.blit(plus_surf, plus_surf_rect)
+            self.inc_buttons.append((plus_rect, p, +1))
+
+            # Center the score between the two buttons
+            score_center_x = (minus_rect.right + plus_rect.left) // 2
+            score_surf = self.font_small.render(str(p.points), True, SCORE_COLOUR)
+            score_rect = score_surf.get_rect(center=(score_center_x, score_y))
+            self.screen.blit(score_surf, score_rect)
 
     def update(self, dt):
         self.sb.update_animation(dt)
