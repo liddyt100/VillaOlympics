@@ -51,6 +51,16 @@ def write_players(df: pd.DataFrame, csv_path: str):
 # -----------------------------
 # Image helpers
 # -----------------------------
+
+from textwrap import dedent  # make sure this import is at the top
+
+def render_html(html: str):
+    """Render left-aligned HTML so Streamlit doesn't treat it as a code block."""
+    html = dedent(html).strip()
+    html = "\n".join(line.lstrip() for line in html.splitlines())
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def file_to_data_uri(file_bytes: bytes, mime: str) -> str:
     b64 = base64.b64encode(file_bytes).decode("utf-8")
     return f"data:{mime};base64,{b64}"
@@ -99,12 +109,14 @@ def path_or_upload_to_url(path_str: str, upload) -> str:
 # -----------------------------
 # Page styling
 # -----------------------------
+
 def inject_page_bg(image_url: str):
     if not image_url:
         return
     st.markdown(
         f"""
         <style>
+        /* Background image */
         .stApp {{
             background-image: url('{image_url}');
             background-size: cover;
@@ -112,10 +124,18 @@ def inject_page_bg(image_url: str):
             background-repeat: no-repeat;
         }}
 
-        /* Make the main content span full width with a dark glass overlay */
+        /* Remove Streamlit's white header/toolbar */
+        header[data-testid="stHeader"] {{
+            background: transparent;
+            height: 0;
+        }}
+        header[data-testid="stHeader"] * {{ visibility: hidden; }}
+        div[data-testid="stToolbar"] {{ display: none; }}
+
+        /* Full-width content with dark glass overlay */
         [data-testid="stAppViewContainer"] .block-container {{
             max-width: 100% !important;
-            padding: 1.25rem;
+            padding: 0.75rem 1.25rem 1.25rem;
             background: rgba(0,0,0,{OVERLAY_OPACITY});
             border-radius: 16px;
         }}
@@ -126,7 +146,7 @@ def inject_page_bg(image_url: str):
             color: {TEXT_COLOUR};
         }}
 
-        /* Headings + body text */
+        /* Typography */
         h1, h2, h3, h4, h5, h6 {{
             color: {TITLE_COLOUR} !important;
             text-shadow: 0 2px 8px rgba(0,0,0,0.5);
@@ -134,21 +154,29 @@ def inject_page_bg(image_url: str):
         p, li, label, span, [data-testid="stMarkdownContainer"] * {{
             color: {TEXT_COLOUR} !important;
         }}
-
-        /* Data editor text */
         [data-testid="stDataFrame"] * {{
             color: {TEXT_COLOUR} !important;
         }}
+
+        /* Leaderboard buttons – clearer +/– */
+        div.stButton > button {{
+            background: rgba(255,255,255,0.95);
+            color: #111 !important;
+            border: 2px solid rgba(255,255,255,0.95);
+            border-radius: 12px;
+            width: 52px;
+            height: 52px;
+            font-size: 1.6rem;
+            font-weight: 800;
+            line-height: 1;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+        }}
+        div.stButton > button:hover {{ transform: translateY(-1px); }}
+        div.stButton > button:active {{ transform: translateY(0); }}
         </style>
         """,
         unsafe_allow_html=True,
     )
-
-def render_html(html: str):
-    """Render left-aligned HTML (avoid Markdown's code-block indentation)."""
-    html = dedent(html).strip()
-    html = "\n".join(line.lstrip() for line in html.splitlines())
-    st.markdown(html, unsafe_allow_html=True)
 
 # -----------------------------
 # Race track (responsive)
