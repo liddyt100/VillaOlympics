@@ -1,12 +1,12 @@
 import base64
 import io
 import os
+import mimetypes
 from pathlib import Path
-from streamlit.components.v1 import html as st_html
-
 
 import pandas as pd
 import streamlit as st
+from streamlit.components.v1 import html as st_html
 
 # -----------------------------
 # Config
@@ -21,7 +21,6 @@ CSV_PATH_DEFAULT = "players.csv"
 # -----------------------------
 def read_players(csv_path: str) -> pd.DataFrame:
     if not os.path.exists(csv_path):
-        # empty starter
         return pd.DataFrame(columns=["name", "points", "avatar"])
     df = pd.read_csv(csv_path)
     if "points" in df:
@@ -42,21 +41,47 @@ def file_to_data_uri(file_bytes: bytes, mime: str) -> str:
     b64 = base64.b64encode(file_bytes).decode("utf-8")
     return f"data:{mime};base64,{b64}"
 
+def local_path_to_data_uri(path_str: str) -> str:
+    """Embed a local image file as a data: URI (works on Streamlit Cloud too)."""
+    p = Path(path_str)
+    if not p.exists() or not p.is_file():
+        return ""
+    mime, _ = mimetypes.guess_type(str(p))
+    mime = mime or "image/png"
+    with open(p, "rb") as f:
+        return file_to_data_uri(f.read(), mime)
+
 def path_or_upload_to_url(path_str: str, upload) -> str:
     """
-    Returns a URL (data: URI) for uploaded image OR a file path/URL string if provided.
-    Preference order: upload > path/url string.
+    Return a browser-usable image URL/URI with this precedence:
+      1) uploaded image -> data: URI
+      2) existing usable string starting with data:/http(s) -> pass-through
+      3) local file path -> embed as data: URI
+      4) otherwise -> ""
     """
+    # 1) uploaded image
     if upload is not None:
         bytes_ = upload.read()
-        # naive mime sniff
+        name = (upload.name or "").lower()
         mime = "image/png"
-        if upload.name.lower().endswith(".jpg") or upload.name.lower().endswith(".jpeg"):
+        if name.endswith(".jpg") or name.endswith(".jpeg"):
             mime = "image/jpeg"
         return file_to_data_uri(bytes_, mime)
-    if path_str:
-        return path_str
-    return ""
+
+    # 2) existing URL/URI
+    s = (path_str or "").strip()
+    if not s:
+        return ""
+    if s.startswith(("data:", "http://", "https://")):
+        return s
+
+    # 3) local path -> embed
+    return local_path_to_data_uri(s)
+
+# ---- add near your other constants if you want to tweak later
+TITLE_COLOUR = "#FFFFFF"      # headings
+TEXT_COLOUR  = "#F5F7FA"      # body text
+OVERLAY_OPACITY = 0.55        # darken the glass behind content (0..1)
 
 def inject_page_bg(image_url: str):
     if not image_url:
@@ -64,47 +89,71 @@ def inject_page_bg(image_url: str):
     st.markdown(
         f"""
         <style>
+        /* Background image */
         .stApp {{
             background-image: url('{image_url}');
             background-size: cover;
             background-position: center;
             background-repeat: no-repeat;
         }}
-        /* soften the main block so text stays readable */
+
+        /* Dark glass behind the content so text pops */
         .block-container {{
-            background: rgba(0,0,0,0.35);
+            background: rgba(0,0,0,{OVERLAY_OPACITY});
             border-radius: 16px;
             padding: 1.5rem;
+        }}
+
+        /* Sidebar glass + text */
+        section[data-testid="stSidebar"] .block-container {{
+            background: rgba(0,0,0,0.55);
+            color: {TEXT_COLOUR};
+        }}
+
+        /* Headings + body text */
+        h1, h2, h3, h4, h5, h6 {{
+            color: {TITLE_COLOUR} !important;
+            text-shadow: 0 2px 8px rgba(0,0,0,0.5);
+        }}
+        p, li, label, span, [data-testid="stMarkdownContainer"] * {{
+            color: {TEXT_COLOUR} !important;
+        }}
+
+        /* Make data editor text readable */
+        [data-testid="stDataFrame"] * {{
+            color: {TEXT_COLOUR} !important;
         }}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
+
 def race_track(players_df: pd.DataFrame):
     """
     Render a horizontal race track with avatars positioned by points/FINISH_LINE.
     Uses CSS for layout so it's fast and simple.
     """
-    # container width/height
     height_px = 420
     lanes = len(players_df)
     lane_h = max(54, int((height_px - 40) / max(1, lanes)))
 
-    # Build lane HTML
     lane_divs = []
-    for idx, row in players_df.iterrows():
-        name = str(row["name"])
-        pts = float(row["points"])
-        avatar_url = str(row.get("avatar", "") or "")
+    for _, row in players_df.iterrows():
+        name = str(row.get("name", "") or "")
+        pts = float(row.get("points", 0) or 0)
+        # IMPORTANT: resolve avatar to data URI / URL (handles data:, http(s), or local path)
+        avatar_cell = str(row.get("avatar", "") or "")
+        avatar_url = path_or_upload_to_url(avatar_cell, None)
+
         progress = max(0.0, min(1.0, pts / FINISH_LINE))
         left_pct = int(progress * 100)
 
-        # fallback avatar (circle colour)
+        # Fallback avatar (coloured circle) if nothing resolvable
         if not avatar_url:
-            # tiny 1x1 png as placeholder dot; styled to circle via CSS
             avatar_url = "data:image/svg+xml;base64," + base64.b64encode(
-                f'<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><circle cx="40" cy="40" r="40" fill="#7785FF"/></svg>'.encode("utf-8")
+                ('<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80">'
+                 '<circle cx="40" cy="40" r="40" fill="#7785FF"/></svg>').encode("utf-8")
             ).decode("utf-8")
 
         lane_divs.append(f"""
@@ -127,7 +176,7 @@ def race_track(players_df: pd.DataFrame):
             width: 100%;
             height: {height_px}px;
             border-radius: 16px;
-            padding: 16px 16px 16px 16px;
+            padding: 16px;
             background: rgba(0,0,0,0.25);
             box-shadow: 0 8px 24px rgba(0,0,0,0.25) inset;
             overflow: hidden;
@@ -160,7 +209,7 @@ def race_track(players_df: pd.DataFrame):
             flex-direction: column;
             align-items: center;
             gap: 4px;
-            transition: left 0.4s ease; /* smooth when points change */
+            transition: left 0.4s ease;
         }}
         .avatar {{
             width: 64px;
@@ -179,9 +228,7 @@ def race_track(players_df: pd.DataFrame):
         }}
     </style>
     """
-    # give it enough height to show all lanes
     st_html(html, height=height_px + 120, scrolling=False)
-
 
 # -----------------------------
 # Sidebar – load/save & customisation
@@ -190,10 +237,10 @@ with st.sidebar:
     st.header("Settings")
 
     csv_path = st.text_input("Players CSV path", CSV_PATH_DEFAULT)
-    bg_file = st.file_uploader("Upload background image (optional)", type=["png","jpg","jpeg"], key="bg_up")
+    bg_file = st.file_uploader("Upload background image (optional)", type=["png", "jpg", "jpeg"], key="bg_up")
     bg_path_text = st.text_input("…or background file/URL", value="assets/background.jpg")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns([1,1,1])
     with col1:
         if st.button("Load CSV"):
             st.session_state["players"] = read_players(csv_path)
@@ -201,13 +248,21 @@ with st.sidebar:
         if st.button("Save CSV"):
             write_players(st.session_state.get("players", pd.DataFrame()), csv_path)
             st.success(f"Saved to {csv_path}")
+    with col3:
+        st.download_button(
+            "Download CSV",
+            (st.session_state.get("players", pd.DataFrame(columns=["name","points","avatar"]))
+             ).to_csv(index=False).encode("utf-8"),
+            file_name="players.csv",
+            mime="text/csv",
+        )
 
 # Initialise players in session
 if "players" not in st.session_state:
     st.session_state["players"] = read_players(csv_path)
 
-# Apply background
-bg_url = path_or_upload_to_url(bg_path_text, bg_file)
+# Apply background (handles upload, URL, data:, or local path)
+bg_url = "https://github.com/liddyt100/VillaOlympics/blob/main/VillaOlympicsWebApp/Assets/background.jpeg?raw=true"
 inject_page_bg(bg_url)
 
 # -----------------------------
@@ -219,14 +274,12 @@ players = st.session_state["players"].copy()
 
 # Avatar uploader/editor per player
 with st.expander("Add / edit players"):
-    st.caption("Tip: you can paste local file paths or URLs for avatars, or upload below.")
+    st.caption("Tip: paste public URLs or data URIs for avatars, or keep local paths when you control the server.")
     if players.empty:
-        # provide a blank row to get started
-        players = pd.DataFrame([{"name":"", "points":0, "avatar":""}])
+        players = pd.DataFrame([{"name": "", "points": 0, "avatar": ""}])
 
-    # editable table for name/points
     edited = st.data_editor(
-        players[["name","points","avatar"]],
+        players[["name", "points", "avatar"]],
         num_rows="dynamic",
         use_container_width=True,
         key="players_editor",
@@ -240,22 +293,27 @@ race_track(st.session_state["players"])
 # Leaderboard with +/–
 st.subheader("Leaderboard")
 lb = st.session_state["players"].copy()
-lb = lb.sort_values(["points","name"], ascending=[False, True]).reset_index(drop=True)
+lb = lb.sort_values(["points", "name"], ascending=[False, True]).reset_index(drop=True)
 
-# render leaderboard rows with buttons
 for i, row in lb.iterrows():
     c1, c2, c3, c4, c5 = st.columns([0.6, 0.1, 0.4, 0.3, 0.3])
     c1.markdown(f"**{i+1}. {row['name'] or '—'}**")
     c2.markdown("&nbsp;")
-    c3.markdown(f"{float(row['points']):.0f} pts" if float(row["points"]).is_integer() else f"{float(row['points']):.1f} pts")
+    c3.markdown(
+        f"{float(row['points']):.0f} pts" if float(row["points"]).is_integer()
+        else f"{float(row['points']):.1f} pts"
+    )
     if c4.button("−", key=f"minus_{i}"):
-        # update in session df
         name = row["name"]
         mask = st.session_state["players"]["name"] == name
-        st.session_state["players"].loc[mask, "points"] = st.session_state["players"].loc[mask, "points"].astype(float) - 1
+        st.session_state["players"].loc[mask, "points"] = (
+            st.session_state["players"].loc[mask, "points"].astype(float) - 1
+        )
     if c5.button("+", key=f"plus_{i}"):
         name = row["name"]
         mask = st.session_state["players"]["name"] == name
-        st.session_state["players"].loc[mask, "points"] = st.session_state["players"].loc[mask, "points"].astype(float) + 1
+        st.session_state["players"].loc[mask, "points"] = (
+            st.session_state["players"].loc[mask, "points"].astype(float) + 1
+        )
 
 st.caption("Finish line set at 100 points. Change via `FINISH_LINE` in code if you like.")
