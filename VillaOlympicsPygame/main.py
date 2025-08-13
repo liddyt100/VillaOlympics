@@ -1,14 +1,13 @@
-# main.py
+# main.py — web-friendly (no Pillow, async loop)
 # Villa Olympics — Race Leaderboard (Pygame)
-# Customise: swap assets/background.jpeg and avatar images in assets/avatars, edit players.csv
 
 import os
 import csv
-import math
 import time
+import asyncio
+import sys
 import pygame
 from pygame import gfxdraw
-from PIL import Image
 
 # =========================
 # Config – tweak as desired
@@ -17,15 +16,13 @@ WINDOW_W, WINDOW_H = 1200, 700
 FPS = 60
 
 ASSETS_DIR = "assets"
-BACKGROUND_IMG = "assets/background.jpeg"
+BACKGROUND_IMG = "assets/background.jpeg"  # PNG/JPG recommended
 PLAYERS_CSV = "players.csv"
 
 # Layout
 TRACK_LEFT = 40
 TRACK_RIGHT = 860            # race pane width ~820px; rest is leaderboard
 TOP_MARGIN = 90
-LANE_HEIGHT = 90
-LANE_GAP = 18
 
 LEADERBOARD_X = 880
 LEADERBOARD_W = WINDOW_W - LEADERBOARD_X - 30
@@ -45,43 +42,58 @@ GRID_COLOUR = (255, 255, 255, 40)
 # Anim
 EASING_SPEED = 6.0  # higher = snappier interpolation
 
+IS_WEB = (sys.platform == "emscripten")
+
 # =========================
 
 def load_background(path, size):
-    if not os.path.isfile(path):
+    """Load and scale background with pygame only (web-safe)."""
+    try:
+        if not os.path.isfile(path) and not IS_WEB:
+            raise FileNotFoundError
+        img = pygame.image.load(path).convert()
+        img = pygame.transform.smoothscale(img, size)
+        return img
+    except Exception:
         surf = pygame.Surface(size)
         surf.fill((25, 25, 30))
         return surf
-    img = Image.open(path).convert("RGB").resize(size, Image.LANCZOS)
-    mode_str = img.mode
-    return pygame.image.fromstring(img.tobytes(), img.size, mode_str)
 
 def circle_avatar(path, diameter):
-    """Load an image and return a circular-cropped pygame.Surface of given diameter, with high quality."""
-    if not os.path.isfile(path):
-        surf = pygame.Surface((diameter, diameter), pygame.SRCALPHA)
-        pygame.draw.circle(surf, (120, 120, 140), (diameter//2, diameter//2), diameter//2)
-        return surf
+    """Load image via pygame, scale, then mask to a circle (web-safe)."""
+    # Base surface with alpha
+    base = pygame.Surface((diameter, diameter), pygame.SRCALPHA)
 
-    img = Image.open(path).convert("RGBA")
-    # Crop to square first (center crop)
-    min_side = min(img.size)
-    left = (img.width - min_side) // 2
-    top = (img.height - min_side) // 2
-    img = img.crop((left, top, left + min_side, top + min_side))
-    img = img.resize((diameter, diameter), Image.LANCZOS)
+    # Try to load the image; fallback to a coloured circle if missing
+    try:
+        if not os.path.isfile(path) and not IS_WEB:
+            raise FileNotFoundError
+        img = pygame.image.load(path).convert_alpha()
+    except Exception:
+        pygame.draw.circle(base, (120, 120, 140), (diameter//2, diameter//2), diameter//2)
+        return base
 
-    # High-quality antialiased mask
-    mask_size = diameter * 3
-    mask = Image.new("L", (mask_size, mask_size), 0)
-    from PIL import ImageDraw
-    ImageDraw.Draw(mask).ellipse((0, 0, mask_size-1, mask_size-1), fill=255)
-    mask = mask.resize((diameter, diameter), Image.LANCZOS)
-    img.putalpha(mask)
+    # Center-crop to square using pygame (approx by scaling shortest side, then blitting centered)
+    iw, ih = img.get_size()
+    min_side = min(iw, ih)
+    # Compute crop rect centered
+    crop_rect = pygame.Rect((iw - min_side)//2, (ih - min_side)//2, min_side, min_side)
+    square = pygame.Surface((min_side, min_side), pygame.SRCALPHA)
+    square.blit(img, (0, 0), crop_rect)
 
-    mode_str = img.mode
-    pgsurf = pygame.image.fromstring(img.tobytes(), img.size, mode_str)
-    return pgsurf
+    # Resize to diameter
+    square = pygame.transform.smoothscale(square, (diameter, diameter))
+
+    # Create circular mask
+    mask = pygame.Surface((diameter, diameter), pygame.SRCALPHA)
+    pygame.gfxdraw.filled_circle(mask, diameter//2, diameter//2, diameter//2, (255, 255, 255, 255))
+    pygame.gfxdraw.aacircle(mask, diameter//2, diameter//2, diameter//2, (255, 255, 255, 255))
+
+    # Apply mask: per-pixel alpha
+    square_locked = square.copy()
+    square_locked.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+
+    return square_locked
 
 def draw_rounded_rect_alpha(surf, rect, colour_rgba, radius):
     """Draw a rounded rect with alpha onto surf."""
@@ -111,21 +123,23 @@ class Scoreboard:
 
     def load_from_csv(self, path):
         players = []
-        if not os.path.isfile(path):
-            return
-        with open(path, newline="", encoding="utf-8") as f:
-            r = csv.DictReader(f)
-            for row in r:
-                name = row.get("name", "").strip()
-                pts_str = row.get("points", "0").strip()
-                avatar = row.get("avatar", "").strip()
-                if not name:
-                    continue
-                try:
-                    pts = float(pts_str)
-                except:
-                    pts = 0.0
-                players.append(Player(name, pts, avatar))
+        try:
+            with open(path, newline="", encoding="utf-8") as f:
+                r = csv.DictReader(f)
+                for row in r:
+                    name = (row.get("name") or "").strip()
+                    pts_str = (row.get("points") or "0").strip()
+                    avatar = (row.get("avatar") or "").strip()
+                    if not name:
+                        continue
+                    try:
+                        pts = float(pts_str)
+                    except:
+                        pts = 0.0
+                    players.append(Player(name, pts, avatar))
+        except Exception:
+            # If missing in web build or first run, start empty
+            players = []
         self.players = players
         self.last_loaded = time.time()
 
@@ -133,18 +147,14 @@ class Scoreboard:
         if not self.players:
             return
         max_pts = 100.0  # Fixed finish line at 100 points
-        # Avoid divide by zero; if all zero, everyone at start
         for p in self.players:
-            p.progress_target = 0.0 if max_pts <= 0 else (p.points / max_pts)
+            p.progress_target = 0.0 if max_pts <= 0 else max(0.0, min(1.0, p.points / max_pts))
 
     def update_animation(self, dt):
-        # Smoothly approach target
         for p in self.players:
-            # simple exponential smoothing
             p.progress_current += (p.progress_target - p.progress_current) * min(1.0, EASING_SPEED * dt)
 
     def sort_for_leaderboard(self):
-        # Highest first, tie-break by name
         return sorted(self.players, key=lambda p: (-p.points, p.name.lower()))
 
 class App:
@@ -157,7 +167,7 @@ class App:
         self.sb = Scoreboard()
         self.sb.load_from_csv(PLAYERS_CSV)
         self.sb.set_target_progresses()
-        self.inc_buttons = []  # (rect, player_index, delta)
+        self.inc_buttons = []  # (rect, player_obj, delta)
 
         # Fonts
         self.font_big = pygame.font.SysFont("Arial", 28, bold=True)
@@ -176,6 +186,7 @@ class App:
                 self.running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_r:
+                    # In web builds, packaged files are read-only; this will only help on desktop.
                     self.sb.load_from_csv(PLAYERS_CSV)
                     self.sb.set_target_progresses()
                 elif event.key == pygame.K_SPACE:
@@ -188,7 +199,6 @@ class App:
                         self.sb.set_target_progresses()
 
     def draw_grid(self, surf):
-        # vertical tick marks at 0%, 25%, 50%, 75%, 100%
         grid = pygame.Surface((TRACK_RIGHT - TRACK_LEFT, WINDOW_H), pygame.SRCALPHA)
         for frac in [0.0, 0.25, 0.5, 0.75, 1.0]:
             x = int((TRACK_LEFT) + frac * (TRACK_RIGHT - TRACK_LEFT))
@@ -196,49 +206,37 @@ class App:
         surf.blit(grid, (TRACK_LEFT, 0))
 
     def draw_race(self):
-        # Title
         title = self.font_big.render("Villa Olympics", True, NAME_COLOUR)
         self.screen.blit(title, (TRACK_LEFT, 24))
 
-        # Grid lines
         self.draw_grid(self.screen)
 
-        # Dynamically calculate lane height and gap
+        # Dynamic lane sizing
         n = len(self.sb.players)
-        available_height = WINDOW_H - TOP_MARGIN - 40  # leave space at bottom
-        min_lane_h = 40
-        max_lane_h = 90
-        min_gap = 6
-        max_gap = 18
+        available_height = WINDOW_H - TOP_MARGIN - 40
+        min_lane_h, max_lane_h = 40, 90
+        min_gap, max_gap = 6, 18
 
         if n > 0:
-            # Try to fit all lanes and gaps in available space
             lane_h = min(max_lane_h, max(min_lane_h, (available_height - (n - 1) * min_gap) // n))
             gap = min(max_gap, max(min_gap, (available_height - n * lane_h) // max(1, n - 1)))
         else:
-            lane_h = max_lane_h
-            gap = max_gap
+            lane_h, gap = max_lane_h, max_gap
 
         for i, p in enumerate(self.sb.players):
             lane_y = TOP_MARGIN + i * (lane_h + gap)
 
-            # Lane baseline
             pygame.draw.line(self.screen, (255, 255, 255, 50), (TRACK_LEFT, lane_y + lane_h), (TRACK_RIGHT, lane_y + lane_h), 1)
 
-            # Racer position (with padding so avatars don’t clip)
             min_x = TRACK_LEFT + AVATAR_SIZE//2
             max_x = TRACK_RIGHT - AVATAR_SIZE//2
             x = min_x + int(p.progress_current * (max_x - min_x))
             y = lane_y + lane_h//2
 
-            # Avatar outline
             pygame.gfxdraw.aacircle(self.screen, x, y, AVATAR_SIZE//2 + AVATAR_OUTLINE_THICK, AVATAR_OUTLINE)
             pygame.gfxdraw.filled_circle(self.screen, x, y, AVATAR_SIZE//2 + AVATAR_OUTLINE_THICK, AVATAR_OUTLINE)
-
-            # Avatar image
             self.screen.blit(p.avatar, (x - AVATAR_SIZE//2, y - AVATAR_SIZE//2))
 
-            # Name tag above
             name_surf = self.font_small.render(p.name, True, NAME_COLOUR)
             name_rect = name_surf.get_rect(center=(x, y - AVATAR_SIZE//2 - 16))
             draw_rounded_rect_alpha(self.screen, (name_rect.x - 8, name_rect.y - 4, name_rect.w + 16, name_rect.h + 8), (0, 0, 0, 140), 10)
@@ -258,25 +256,21 @@ class App:
 
         sorted_players = self.sb.sort_for_leaderboard()
         n = len(sorted_players)
-        available_height = WINDOW_H - 100  # leave space for title and footer
-        min_row_h = 40
-        max_row_h = 76
+        available_height = WINDOW_H - 100
+        min_row_h, max_row_h = 40, 76
         spacing = 8
 
-        # Dynamically calculate row height and spacing
         if n > 0:
             row_h = min(max_row_h, max(min_row_h, (available_height - (n - 1) * spacing) // n))
             start_y = 70
         else:
-            row_h = max_row_h
-            start_y = 70
+            row_h, start_y = max_row_h, 70
 
         for idx, p in enumerate(sorted_players):
             y = start_y + idx * (row_h + spacing)
             rect = (LEADERBOARD_X, y, LEADERBOARD_W, row_h)
             draw_rounded_rect_alpha(self.screen, rect, PILL_BG, ROW_RADIUS)
 
-            # Rank circle
             rank = idx + 1
             rank_text = self.font_med.render(f"{rank}", True, (30, 30, 35))
             circle_r = max(14, row_h // 3)
@@ -286,12 +280,10 @@ class App:
             pygame.gfxdraw.aacircle(self.screen, circle_x, circle_y, circle_r, UI_ACCENT)
             self.screen.blit(rank_text, rank_text.get_rect(center=(circle_x, circle_y)))
 
-            # Mini avatar
             mini_size = max(24, row_h - 28)
             mini = pygame.transform.smoothscale(p.avatar, (mini_size, mini_size))
             self.screen.blit(mini, (LEADERBOARD_X + 60, y + (row_h - mini_size)//2))
 
-            # Name & points
             name_s = self.font_med.render(p.name, True, NAME_COLOUR)
             self.screen.blit(name_s, (LEADERBOARD_X + 120, y + 8))
 
@@ -299,7 +291,6 @@ class App:
             pts_s = self.font_small.render(f"{pts_txt} pts", True, SCORE_COLOUR)
             self.screen.blit(pts_s, (LEADERBOARD_X + 120, y + row_h // 2))
 
-            # Button and score sizing/positioning
             button_size = max(16, row_h // 3)
             button_gap = 16
             right_margin = 24
@@ -308,27 +299,17 @@ class App:
             score_y = y + row_h // 2
             minus_x = plus_x - button_size - button_gap
 
-            # Draw minus button
             minus_rect = pygame.Rect(minus_x, score_y - button_size // 2, button_size, button_size)
             pygame.draw.rect(self.screen, (200, 60, 60), minus_rect, border_radius=4)
             minus_surf = self.font_small.render("–", True, (255, 255, 255))
-            minus_surf_rect = minus_surf.get_rect(center=minus_rect.center)
-            self.screen.blit(minus_surf, minus_surf_rect)
+            self.screen.blit(minus_surf, minus_surf.get_rect(center=minus_rect.center))
             self.inc_buttons.append((minus_rect, p, -1))
 
-            # Draw plus button
             plus_rect = pygame.Rect(plus_x, score_y - button_size // 2, button_size, button_size)
             pygame.draw.rect(self.screen, (60, 200, 60), plus_rect, border_radius=4)
             plus_surf = self.font_small.render("+", True, (255, 255, 255))
-            plus_surf_rect = plus_surf.get_rect(center=plus_rect.center)
-            self.screen.blit(plus_surf, plus_surf_rect)
+            self.screen.blit(plus_surf, plus_surf.get_rect(center=plus_rect.center))
             self.inc_buttons.append((plus_rect, p, +1))
-
-            # # Center the score between the two buttons
-            # score_center_x = (minus_rect.right + plus_rect.left) // 2
-            # score_surf = self.font_small.render(str(p.points), True, SCORE_COLOUR)
-            # score_rect = score_surf.get_rect(center=(score_center_x, score_y))
-            # self.screen.blit(score_surf, score_rect)
 
     def update(self, dt):
         self.sb.update_animation(dt)
@@ -337,19 +318,25 @@ class App:
         self.screen.blit(self.bg, (0, 0))
         self.draw_race()
         self.draw_leaderboard()
-
         pygame.display.flip()
 
-    def run(self):
-        while self.running:
-            dt = self.clock.tick(FPS) / 1000.0
-            self.handle_events()
-            keys = pygame.key.get_pressed()
-            if keys[pygame.K_ESCAPE]:
-                self.running = False
-            self.update(dt)
-            self.draw()
-        pygame.quit()
+async def main():
+    app = App()
+    # Main loop (async-friendly for pygbag)
+    while app.running:
+        dt = app.clock.tick(FPS) / 1000.0
+        app.handle_events()
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_ESCAPE]:
+            app.running = False
+        app.update(dt)
+        app.draw()
+        await asyncio.sleep(0)  # crucial for web builds
+    pygame.quit()
 
 if __name__ == "__main__":
-    App().run()
+    try:
+        asyncio.run(main())
+    except RuntimeError:
+        # Some environments (including pygbag) may manage the loop themselves
+        pass
