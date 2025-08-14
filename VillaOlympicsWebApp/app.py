@@ -3,6 +3,8 @@ import os
 import mimetypes
 from pathlib import Path
 from textwrap import dedent
+import time
+
 
 import pandas as pd
 import streamlit as st
@@ -47,6 +49,50 @@ def write_players(df: pd.DataFrame, csv_path: str):
         if c not in df.columns:
             df[c] = ""
     df[save_cols].to_csv(csv_path, index=False)
+
+def bump_points(player_name: str, delta: float):
+    df = st.session_state.get("players", pd.DataFrame())
+    if df.empty or "name" not in df.columns:
+        return
+    # normalize names on compare
+    mask = df["name"].astype(str).str.strip() == str(player_name).strip()
+    if not mask.any():
+        return
+    pts = pd.to_numeric(df.loc[mask, "points"], errors="coerce").fillna(0.0)
+    df.loc[mask, "points"] = (pts + delta).clip(lower=0)  # no negatives
+    st.session_state["players"] = df
+    # freeze resorting for a short moment so buttons don't jump under the cursor
+    st.session_state["sort_frozen_until"] = time.time() + 0.8  # seconds
+
+def get_leaderboard_df():
+    df = st.session_state["players"].copy()
+    df["points"] = pd.to_numeric(df["points"], errors="coerce").fillna(0.0)
+    df["name"] = df["name"].astype(str).str.strip()
+
+    live_sort = st.session_state.get("live_sort", True)
+    now = time.time()
+    freeze_until = st.session_state.get("sort_frozen_until", 0)
+
+    # Use a stable display order list in session_state
+    display_order = st.session_state.get("display_order", list(df["name"]))
+
+    if live_sort:
+        if now < freeze_until and display_order:
+            # while frozen, keep previous visual order
+            df = df.set_index("name").reindex([n for n in display_order if n in df["name"].values]).reset_index()
+        else:
+            # resort and remember this order
+            df = df.sort_values(["points", "name"], ascending=[False, True]).reset_index(drop=True)
+            st.session_state["display_order"] = df["name"].tolist()
+    else:
+        # fixed order mode (first load uses CSV order)
+        if not display_order:
+            display_order = list(df["name"])
+        df = df.set_index("name").reindex([n for n in display_order if n in df["name"].values]).reset_index()
+
+    return df
+
+
 
 # -----------------------------
 # Image helpers
@@ -334,28 +380,29 @@ st.subheader("Race")
 race_track(st.session_state["players"])
 
 st.subheader("Leaderboard")
-lb = st.session_state["players"].copy()
-lb = lb.sort_values(["points", "name"], ascending=[False, True]).reset_index(drop=True)
+
+# toggle: turn live resorting on/off
+colA, colB = st.columns([0.4, 0.6])
+with colA:
+    st.session_state.setdefault("live_sort", True)
+    st.toggle("Live resort by points", key="live_sort", help="Turn off to keep the current order while editing")
+
+lb = get_leaderboard_df()
 
 for i, row in lb.iterrows():
-    c1, c2, c3, c4, c5 = st.columns([0.6, 0.1, 0.4, 0.3, 0.3])
-    c1.markdown(f"**{i+1}. {row['name'] or '—'}**")
+    name = str(row.get("name", "") or "")
+    pts  = float(row.get("points", 0) or 0)
+
+    c1, c2, c3, c4, c5 = st.columns([0.6, 0.1, 0.4, 0.25, 0.25])
+    c1.markdown(f"**{i+1}. {name or '—'}**")
     c2.markdown("&nbsp;")
-    c3.markdown(
-        f"{float(row['points']):.0f} pts" if float(row["points"]).is_integer()
-        else f"{float(row['points']):.1f} pts"
-    )
-    if c4.button("−", key=f"minus_{i}"):
-        name = row["name"]
-        mask = st.session_state["players"]["name"] == name
-        st.session_state["players"].loc[mask, "points"] = (
-            st.session_state["players"].loc[mask, "points"].astype(float) - 1
-        )
-    if c5.button("+", key=f"plus_{i}"):
-        name = row["name"]
-        mask = st.session_state["players"]["name"] == name
-        st.session_state["players"].loc[mask, "points"] = (
-            st.session_state["players"].loc[mask, "points"].astype(float) + 1
-        )
+    c3.markdown(f"{int(pts)} pts" if pts.is_integer() else f"{pts:.1f} pts")
+
+    # stable keys based on player name (not index)
+    if c4.button("−", key=f"minus_{name}"):
+        bump_points(name, -1)
+    if c5.button("+", key=f"plus_{name}"):
+        bump_points(name, +1)
+
 
 st.caption("Finish line set at 100 points. Change via FINISH_LINE in code if you like.")
